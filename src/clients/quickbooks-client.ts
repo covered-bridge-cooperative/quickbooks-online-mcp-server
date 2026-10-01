@@ -247,14 +247,17 @@ export class QuickbooksClient {
   }
 
   private async startOAuthFlow(): Promise<void> {
-    // The interactive flow below binds a localhost callback server, but Intuit
-    // rejects localhost redirect URIs for production apps — so this can only
-    // ever succeed in sandbox. Fail fast with guidance rather than opening a
-    // doomed browser window on a production server.
-    if (this.environment === 'production') {
-      throw this.reauthError();
-    }
-
+    // Runs in BOTH environments. Intuit rejects a bare localhost redirect_uri
+    // for production apps, so the authorize/exchange pair below uses the
+    // configured QUICKBOOKS_REDIRECT_URI (a publicly registered HTTPS URL for
+    // production) — the browser lands on the local listener either via a
+    // tunnel that forwards to it, or by rewriting the returned URL to
+    // http://localhost:8000/callback by hand.
+    //
+    // Note the production server whose STORED token has died does not reach
+    // here: authenticate() surfaces the actionable re-auth error instead,
+    // because a host-spawned stdio subprocess has nobody watching for a
+    // browser login (see the isAuthInvalidation branch there).
     if (this.isAuthenticating) {
       return;
     }
@@ -262,16 +265,16 @@ export class QuickbooksClient {
     this.isAuthenticating = true;
     const port = 8000;
 
-    // The local server below receives the callback, so the authorize/exchange
-    // pair must use the localhost redirect even when QUICKBOOKS_REDIRECT_URI
-    // points elsewhere (e.g. the OAuth playground used for manual token
-    // generation). Intuit rejects the exchange if the redirect_uri does not
-    // match the one used in the authorize request.
+    // Use the client's configured redirect URI (QUICKBOOKS_REDIRECT_URI,
+    // defaulting to http://localhost:8000/callback). Authorize and exchange
+    // MUST carry the same redirect_uri — Intuit rejects the exchange otherwise
+    // — and for production it must be the publicly registered HTTPS URL.
+    // The local listener below always binds `port` regardless of this value.
     const flowClient = new OAuthClient({
       clientId: this.clientId,
       clientSecret: this.clientSecret,
       environment: this.environment,
-      redirectUri: `http://localhost:${port}/callback`,
+      redirectUri: this.redirectUri,
     });
 
     return new Promise((resolve, reject) => {

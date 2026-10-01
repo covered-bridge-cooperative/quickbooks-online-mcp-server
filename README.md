@@ -387,12 +387,15 @@ If you only want to read your own company's data, you still need to set up an ap
 
 ### Production Setup
 
-The Intuit Developer Portal **rejects `http://localhost` redirect URIs in production mode** — every contributor hits this. Two known workarounds:
+The Intuit Developer Portal **rejects `http://localhost` redirect URIs in production mode** — every contributor hits this. Three known workarounds:
 
-1. **ngrok tunnel (most common):** run `ngrok http 8000`, then on your Intuit app go to **Settings → Redirect URIs** and add the generated `https://<id>.ngrok-free.app/callback` URL. Use that URL for the OAuth handshake, then revert to localhost afterwards.
-2. **Deploy a small public callback handler** (e.g., on a VPS or serverless function) that captures the auth code and hands it back to your local setup. More involved; only needed if you can't use ngrok.
+1. **ngrok / cloudflared tunnel (most common):** run `ngrok http 8000`, then on your Intuit app go to **Settings → Redirect URIs → Production** and add the generated `https://<id>.ngrok-free.app/callback` URL. Use that URL for the OAuth handshake, then revert to localhost afterwards.
+2. **Deploy a small public callback handler** (e.g., on a VPS or serverless function) that captures the auth code and hands it back to your local setup. More involved; only needed if you can't use a tunnel.
+3. **Manual rewrite — no public host at all:** register any URI you can own (Intuit's own OAuth Playground redirect URL works), let Intuit send the browser there with `?code=…`, then edit the address bar to `http://localhost:8000/callback?code=…` and load it. The local listener completes the exchange against the registered `redirect_uri`.
 
-After completing the production OAuth handshake, the refresh token is what matters — once it's in `.env`, you no longer need the public redirect URL for day-to-day use. Refresh tokens auto-rotate; the server persists the new token on each refresh.
+Production redirect URIs are registered on a **separate tab** from sandbox ones, and must be `https` — Intuit does not allow IP addresses as redirect hosts. The interactive flow honors `QUICKBOOKS_REDIRECT_URI` (set it to the public URL you registered), so `npm run auth` completes against a live company.
+
+After completing the production OAuth handshake, the refresh token is what matters — once it's in `.env`, you no longer need the public redirect URL for day-to-day use. Refresh tokens auto-rotate; the server persists the new token on each refresh. If a *stored* production token later dies, the server surfaces an actionable re-auth error rather than trying to open a browser nobody is watching — re-run `npm run auth` after updating `QUICKBOOKS_REDIRECT_URI`.
 
 ### Once you have tokens
 

@@ -8,16 +8,24 @@
  *    stored refresh token is rejected (e.g. invalid_grant after the token
  *    was rotated by another consumer, expired past the 100-day window, or
  *    was revoked).
- * 2. The interactive flow must authorize AND exchange with the localhost
- *    callback redirect, even when QUICKBOOKS_REDIRECT_URI points elsewhere
- *    (e.g. the OAuth playground). Intuit rejects the code exchange if the
- *    redirect_uri differs from the one used in the authorize request.
+ * 2. The interactive flow must authorize AND exchange using whatever
+ *    QUICKBOOKS_REDIRECT_URI is configured (e.g. the OAuth playground, or a
+ *    production HTTPS tunnel) rather than a hardcoded localhost redirect —
+ *    Intuit rejects both the exchange (mismatched redirect_uri) and, for
+ *    production apps, the authorize request itself if it's a bare localhost
+ *    URL.
+ * 3. Production must be able to run the interactive flow at all. A production
+ *    client with no tokens is the `npm run auth` cutover case: the flow has to
+ *    start (with the publicly registered HTTPS redirect) instead of failing
+ *    fast, while a production client whose STORED refresh token is genuinely
+ *    dead must still surface the actionable re-auth error rather than opening
+ *    a browser window inside a host-spawned stdio subprocess.
  */
 import { jest } from '@jest/globals';
 
 // The module under test validates env at import time. Set deterministic
 // values before importing it. QUICKBOOKS_REDIRECT_URI deliberately points
-// away from localhost to prove the flow ignores it.
+// away from localhost to prove the flow actually uses it.
 process.env.QUICKBOOKS_CLIENT_ID = 'test-client-id';
 process.env.QUICKBOOKS_CLIENT_SECRET = 'test-client-secret';
 process.env.QUICKBOOKS_REFRESH_TOKEN = 'stale-refresh-token';
@@ -105,7 +113,7 @@ jest.unstable_mockModule('fs', () => ({
   },
 }));
 
-const { quickbooksClient } = await import('../../../src/clients/quickbooks-client');
+const { quickbooksClient, QuickbooksClient } = await import('../../../src/clients/quickbooks-client');
 
 // Polls until the OAuth callback handler has been registered by startOAuthFlow.
 async function untilCallbackRegistered(timeoutMs = 2000): Promise<void> {
@@ -140,7 +148,7 @@ describe('QuickbooksClient.authenticate', () => {
     expect(callbackHandler).toBeUndefined();
   });
 
-  it('falls back to the interactive OAuth flow when the refresh token is rejected, and uses the localhost redirect', async () => {
+  it('falls back to the interactive OAuth flow when the refresh token is rejected, and uses QUICKBOOKS_REDIRECT_URI', async () => {
     // Force the next authenticate() to attempt a refresh.
     (quickbooksClient as unknown as { accessTokenExpiry?: Date }).accessTokenExpiry = new Date(0);
 
@@ -159,11 +167,13 @@ describe('QuickbooksClient.authenticate', () => {
 
     await untilCallbackRegistered();
 
-    // A second OAuthClient was constructed for the flow, with the localhost
-    // redirect (NOT the playground URI from the environment).
+    // A second OAuthClient was constructed for the flow, using
+    // QUICKBOOKS_REDIRECT_URI from the environment (NOT a hardcoded
+    // localhost redirect) — required for production apps, which Intuit
+    // rejects a bare localhost redirect_uri for outright.
     expect(oauthInstances).toHaveLength(2);
     const flowClient = oauthInstances[1];
-    expect(flowClient.cfg.redirectUri).toBe('http://localhost:8000/callback');
+    expect(flowClient.cfg.redirectUri).toBe(process.env.QUICKBOOKS_REDIRECT_URI);
 
     // The state actually used is a random per-run value, not a fixed literal —
     // read it off the authorizeUri() call so the simulated callback matches it.
@@ -210,4 +220,63 @@ describe('QuickbooksClient.authenticate', () => {
     expect(res.writeHead).toHaveBeenCalledWith(400, { 'Content-Type': 'text/plain' });
     expect(createTokenDispatch).not.toHaveBeenCalled();
   });
+});
+
+describe('QuickbooksClient production authentication', () => {
+  const PROD_REDIRECT = 'https://qbo-auth.example.com/callback';
+
+  // A production client with NO stored tokens is the `npm run auth` cutover
+  // case. Before this behaviour existed, startOAuthFlow() threw immediately
+  // for production (upstream #104, reported as #145), so no production
+  // handshake could complete even with a publicly registered HTTPS redirect.
+  it('starts the interactive OAuth flow in production when no tokens are stored', async () => {
+    const prodClient = new QuickbooksClient({
+      clientId: process.env.QUICKBOOKS_CLIENT_ID as string,
+      clientSecret: process.env.QUICKBOOKS_CLIENT_SECRET as string,
+      environment: 'production',
+      redirectUri: PROD_REDIRECT,
+    });
+
+    callbackHandler = undefined;
+    const before = oauthInstances.length;
+    // Deliberately NOT awaited: the flow parks waiting for a browser callback
+    // that never arrives in a unit test.
+    const authPromise = prodClient.authenticate().catch((e) => e);
+
+    await untilCallbackRegistered();
+
+    // The flow ran: a dedicated OAuthClient was constructed carrying the PUBLIC
+    // production redirect, not the hardcoded localhost one.
+    expect(oauthInstances).toHaveLength(before + 1);
+    const flowClient = oauthInstances[oauthInstances.length - 1];
+    expect(flowClient.cfg.redirectUri).toBe(PROD_REDIRECT);
+    expect(flowClient.cfg.environment).toBe('production');
+
+    await untilAuthorizeUriCalled(flowClient);
+    expect(flowClient.authorizeUri).toHaveBeenCalled();
+
+    void authPromise;
+  }, 15000);
+
+  // The fail-fast error is still correct for the case it was written for: a
+  // host-spawned stdio subprocess whose STORED token is genuinely dead must not
+  // open a browser window nobody is watching.
+  it('still surfaces the actionable re-auth error in production when the stored refresh token is dead', async () => {
+    const prodClient = new QuickbooksClient({
+      clientId: process.env.QUICKBOOKS_CLIENT_ID as string,
+      clientSecret: process.env.QUICKBOOKS_CLIENT_SECRET as string,
+      refreshToken: 'revoked-refresh-token',
+      realmId: '12345',
+      environment: 'production',
+      redirectUri: PROD_REDIRECT,
+    });
+
+    // invalid_grant is the genuinely-dead signal. `mockRejectedValue` (not
+    // ...Once) because a transient failure must never reach the re-auth branch.
+    refreshDispatch.mockRejectedValue(
+      new Error('Request failed with status code 400 invalid_grant')
+    );
+
+    await expect(prodClient.authenticate()).rejects.toThrow(/Re-authorize this company/);
+  }, 15000);
 });

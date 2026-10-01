@@ -15,7 +15,10 @@
  *
  * Prerequisites:
  * - QUICKBOOKS_CLIENT_ID and QUICKBOOKS_CLIENT_SECRET must be set in .env
- * - http://localhost:8000/callback must be registered as a redirect URI in your Intuit app
+ * - The redirect URI registered in your Intuit app must match
+ *   QUICKBOOKS_REDIRECT_URI exactly. Sandbox: http://localhost:8000/callback.
+ *   Production: a public HTTPS URL that forwards to this local port (Intuit
+ *   rejects localhost and IP hosts for production apps).
  */
 
 import { quickbooksClient } from './clients/quickbooks-client.js';

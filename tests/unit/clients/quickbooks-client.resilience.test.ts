@@ -73,9 +73,9 @@ jest.unstable_mockModule('node-quickbooks', () => ({
 
 jest.unstable_mockModule('open', () => ({ default: openMock }));
 
-// http.createServer must never be reached in these tests (production throws
-// before it; the rotation tests never fall back). If it is, serverCreated flips
-// so we can assert "no doomed browser flow was started".
+// http.createServer is only reached when the interactive OAuth flow actually
+// starts: the dead-token tests below must never start it, while the
+// no-token production case (the `npm run auth` cutover path) must.
 let serverCreated = false;
 const fakeServer = {
   // The test only needs to observe that interactive OAuth attempted to create
@@ -260,13 +260,28 @@ describe('production dead-token handling', () => {
     await expect(client.authenticate()).rejects.toThrow(/cannot be renewed automatically in production/);
   });
 
-  it('throws the same actionable error when a production server starts with no refresh token', async () => {
+  it('starts the interactive flow instead of failing fast when a production server starts with no refresh token', async () => {
+    // This is the `npm run auth` cutover case. Production now honors
+    // QUICKBOOKS_REDIRECT_URI, so the handshake is completable and a missing
+    // token must begin the flow. The fail-fast error above still applies to a
+    // *dead stored* token, which is the case it was written for.
     const client = makeClient({ environment: 'production', refreshToken: '' });
     (client as unknown as { refreshToken?: string }).refreshToken = undefined;
 
-    await expect(client.authenticate()).rejects.toThrow(/cannot be renewed automatically in production/);
-    expect(serverCreated).toBe(false);
-    expect(openMock).not.toHaveBeenCalled();
+    // Never await the flow itself: with no browser callback coming it parks.
+    // Race a short timer to observe that it parked rather than threw.
+    const outcome = await Promise.race([
+      client.authenticate().then(
+        () => 'resolved',
+        (e: Error) => `threw: ${e.message}`
+      ),
+      new Promise<string>((resolve) =>
+        setTimeout(() => resolve('parked-waiting-for-callback'), 300)
+      ),
+    ]);
+
+    expect(outcome).toBe('parked-waiting-for-callback');
+    expect(serverCreated).toBe(true);
   });
 
   it('does NOT report reauth for a transient error in production, and preserves the token', async () => {
